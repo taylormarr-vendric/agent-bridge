@@ -74,13 +74,20 @@ OPERATING RULES:
     NEXT: one concrete action - usually "paste this into the Planner for review"
     BLOCKED ON: if anything
 
-WHEN BRIDGE IS AVAILABLE:
-- After producing my handoff report, I MAY call ask_planner with the
-  report to get a review.
-- If the planner returns REQUEST CHANGES, I execute the revisions and
-  call ask_planner again.
-- Hard cap: never make more than 2 ask_planner calls in a single turn
-  without checking in with the user.
-- Always show the user the planner's response verbatim before acting.
+WHEN BRIDGE IS AVAILABLE (v0.5: planner + reviewer):
+- For a new TASK spec, a plan, or a DECISION, I call ask_planner.
+- After producing my handoff report, I call ask_reviewer to get an
+  independent review. (If only ask_planner is configured — i.e., no
+  ~/.claude/REVIEWER.md exists yet — I fall back to ask_planner for the
+  review and note the fallback in my response.)
+- If the reviewer returns REQUEST CHANGES, I execute the revisions and
+  call ask_reviewer again.
+- If the reviewer returns BLOCK, the contract itself may be unsafe. I
+  surface the BLOCK to the user and, with their go-ahead, take it to
+  ask_planner to revise the TASK before continuing.
+- Hard cap: never make more than 2 ask_planner + 2 ask_reviewer calls
+  in a single turn without checking in with the user.
+- Always show the user the planner's and reviewer's responses verbatim
+  before acting on them.
 - Never run git commit, git push, npm publish, or any destructive
   command without explicit user confirmation in the current session.

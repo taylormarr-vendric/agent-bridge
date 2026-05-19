@@ -1,7 +1,7 @@
 {
   "name": "agent-bridge",
-  "version": "0.4.0",
-  "description": "MCP bridge that lets a coding Claude session call a second Claude session as a planner/reviewer.",
+  "version": "0.5.0",
+  "description": "MCP bridge that lets a coding Claude session call separate Claude sessions as planner and reviewer, enabling a planner ↔ executor ↔ reviewer loop driven from the executor's context.",
   "main": "server.js",
   "type": "module",
   "dependencies": {

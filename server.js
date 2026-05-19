@@ -12,7 +12,10 @@ import { join } from "node:path";
 
 const TIMEOUT_MS = 5 * 60 * 1000;
 const PLANNER_MEMORY_PATH = join(homedir(), ".claude", "PLANNER.md");
+const REVIEWER_MEMORY_PATH = join(homedir(), ".claude", "REVIEWER.md");
 
+// Planner memory is required at startup. Fatal-on-missing preserves the
+// v0.4 contract so existing deployments fail loudly if misconfigured.
 let plannerSystemPrompt;
 try {
   plannerSystemPrompt = readFileSync(PLANNER_MEMORY_PATH, "utf8");
@@ -21,13 +24,29 @@ try {
   process.exit(1);
 }
 
-function runPlanner(userPrompt) {
+// Reviewer memory is lazy-loaded on first ask_reviewer call so v0.4 users
+// without REVIEWER.md can still start the bridge and keep using ask_planner.
+let reviewerSystemPrompt = null;
+function loadReviewerPrompt() {
+  if (reviewerSystemPrompt !== null) return reviewerSystemPrompt;
+  try {
+    reviewerSystemPrompt = readFileSync(REVIEWER_MEMORY_PATH, "utf8");
+    return reviewerSystemPrompt;
+  } catch (err) {
+    throw new Error(
+      "Reviewer memory missing at " + REVIEWER_MEMORY_PATH +
+      ". Create it (see examples/reviewer-memory.md) or call ask_planner instead."
+    );
+  }
+}
+
+function runChildClaude(systemPrompt, userPrompt) {
   return new Promise((resolve, reject) => {
-    // Send: planner instructions on top, separator, then user prompt
+    // Send: role/system context on top, separator, then user prompt.
     // All via stdin. NO shell, NO CLI string args with content.
     const combinedInput =
       "SYSTEM CONTEXT (your role and rules):\n" +
-      plannerSystemPrompt +
+      systemPrompt +
       "\n\n---\n\nUSER MESSAGE:\n" +
       userPrompt;
 
@@ -64,7 +83,7 @@ function runPlanner(userPrompt) {
 }
 
 const server = new Server(
-  { name: "agent-bridge", version: "0.4.0" },
+  { name: "agent-bridge", version: "0.5.0" },
   { capabilities: { tools: {} } }
 );
 
@@ -72,11 +91,22 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
     {
       name: "ask_planner",
-      description: "Send a prompt to the Planner Claude (a second Claude session running with the planner/reviewer role). Use to request a TASK block, get a code review on a handoff report, or get architectural input. Returns the planner verbatim response.",
+      description: "Send a prompt to the Planner Claude (a second Claude session running with the planner role from ~/.claude/PLANNER.md). Use to request a TASK block, get a plan, or get architectural input. Returns the planner verbatim response.",
       inputSchema: {
         type: "object",
         properties: {
           prompt: { type: "string", description: "The full prompt to send to the planner." }
+        },
+        required: ["prompt"]
+      }
+    },
+    {
+      name: "ask_reviewer",
+      description: "Send an executor handoff report (or any work artifact) to the Reviewer Claude — a fresh session running with the reviewer role from ~/.claude/REVIEWER.md, independent of the planner. Use to get an APPROVE / REQUEST CHANGES / BLOCK verdict on work the executor has already produced. Returns the reviewer verbatim response. If REVIEWER.md does not exist, returns a bridge error pointing the executor at examples/reviewer-memory.md.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          prompt: { type: "string", description: "The full prompt to send to the reviewer — typically the executor's handoff report plus any context the reviewer needs to judge it (original TASK contract, diff, verbatim test output)." }
         },
         required: ["prompt"]
       }
@@ -87,8 +117,14 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
 server.setRequestHandler(CallToolRequestSchema, async (req) => {
   const { name, arguments: args } = req.params;
   try {
-    if (name !== "ask_planner") throw new Error("Unknown tool: " + name);
-    const result = await runPlanner(args.prompt);
+    let result;
+    if (name === "ask_planner") {
+      result = await runChildClaude(plannerSystemPrompt, args.prompt);
+    } else if (name === "ask_reviewer") {
+      result = await runChildClaude(loadReviewerPrompt(), args.prompt);
+    } else {
+      throw new Error("Unknown tool: " + name);
+    }
     return { content: [{ type: "text", text: result }] };
   } catch (err) {
     return {
@@ -100,4 +136,4 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
 
 const transport = new StdioServerTransport();
 await server.connect(transport);
-console.error("agent-bridge v0.4 (stdin-only, no shell) running on stdio");
+console.error("agent-bridge v0.5 (planner + reviewer, stdin-only, no shell) running on stdio");

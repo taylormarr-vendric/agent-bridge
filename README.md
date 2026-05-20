@@ -16,9 +16,10 @@ It is roughly 130 lines of JavaScript (`server.js`) plus this README.
 There is no daemon, no web server, no state kept inside the bridge.
 Loop state lives entirely in the Executor's conversation context.
 
-This is **v0.5**. It is a working prototype, not a production loop. See
-`docs/LOOP_DESIGN.md` for the full design, and the "Honest limits"
-section below for what the bridge does and does not do.
+This is **v0.5.1**. It is a working prototype, not a production loop.
+See `docs/LOOP_DESIGN.md` for the loop design and `docs/CACHING.md` for
+the prompt-caching strategy. The "Honest limits" section below covers
+what the bridge does and does not do.
 
 ## Tools exposed
 
@@ -76,8 +77,12 @@ node server.js
 You should see, on **stderr**:
 
 ```
-agent-bridge v0.5 (planner + reviewer, stdin-only, no shell) running on stdio
+agent-bridge v0.5.1 (planner + reviewer, --system-prompt-file, prompt caching) running on stdio
 ```
+
+(If your `claude` CLI is too old to support `--system-prompt-file`, the
+banner reads `... stdin fallback, no caching ...` instead. Behavior is
+identical to v0.5 in that case — see `docs/CACHING.md`.)
 
 The process then waits on stdin for MCP traffic. Stop it with Ctrl-C —
 your MCP client will manage the process lifecycle in normal use.
@@ -143,8 +148,15 @@ to Planner.
   different models, not different vendors. They are independent of each
   other but share blind spots with the rest of the loop. The Reviewer's
   APPROVE means "reasonable to merge," not "guaranteed correct."
-- **Cost can 3x per iteration.** Executor + Planner + Reviewer is three
-  Claude invocations per loop turn. Budget accordingly.
+- **Cost: up to 3x per iteration on cold calls.** Executor + Planner +
+  Reviewer is three Claude invocations per loop turn. v0.5.1 enables
+  prompt caching on the Planner and Reviewer system prompts: after the
+  first call within a 5-minute window, the ~2-4 KB role memory is
+  served from cache (~10% of the uncached input rate) — see
+  `docs/CACHING.md`. The user prompt and output tokens are never
+  cached, so caching cuts the system-prompt portion only, not the full
+  per-call cost. Calls spaced >5 min apart and cold bridge restarts
+  pay the full rate.
 - **5-minute hard timeout.** A single tool call is killed after 5
   minutes. Long planner or reviewer responses on large diffs may not
   fit.

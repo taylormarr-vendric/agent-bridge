@@ -4,22 +4,35 @@
 explains the non-obvious decisions in it — the ones a reader would look
 at and ask "why this way?"
 
-## The shape (v0.5)
+## The shape (v0.5.1)
 
 ```
 Executor (claude in your editor)        ── orchestrates the loop;
     |                                      conversation context = loop state
     | MCP stdio  (JSON-RPC over stdin/stdout)
     v
-server.js   ── reads ──>  ~/.claude/PLANNER.md   (at startup, fatal if missing)
-            ── reads ──>  ~/.claude/REVIEWER.md  (on first ask_reviewer, error if missing)
+server.js   ── validates ──>  ~/.claude/PLANNER.md   (at startup, fatal if missing)
+            ── validates ──>  ~/.claude/REVIEWER.md  (on first ask_reviewer, error if missing)
     |
-    | spawn("claude", ["-p"], { shell: false })
-    | writes <role memory> + separator + user prompt to stdin
+    | spawn("claude", ["-p", "--system-prompt-file", <role memory path>], { shell: false })
+    | writes user prompt to stdin
     v
 Planner (claude -p, stdin-driven, one-shot)   ── invoked via ask_planner
 Reviewer (claude -p, stdin-driven, one-shot)  ── invoked via ask_reviewer
 ```
+
+The role memory file path is the only prompt-related content on argv,
+and a path is a controlled internal string, not user-supplied content —
+so the v0.4 "no prompt content on argv, no shell" rule still holds.
+Passing the memory as `--system-prompt-file` (rather than embedding it
+in a user message on stdin) is what makes the system-prompt prefix
+stable and cacheable across calls. See `docs/CACHING.md` for details.
+
+If the local `claude` CLI is too old to support `--system-prompt-file`,
+`server.js` detects this at startup (via `claude --help`) and falls
+back to the v0.5 layout: memory + separator + user prompt all on
+stdin, with the role memory living inside the user message. The
+fallback is correct but does not cache.
 
 The bridge process is the only long-lived piece. Each Planner or
 Reviewer call is a fresh one-shot child process. The two roles are

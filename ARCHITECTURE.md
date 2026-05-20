@@ -61,52 +61,74 @@ user-supplied prompt content, and was abandoned the same day.
 **Sourcing the role system prompt from an env var.** Same argv/length
 limit on Windows; also leaks into child process listings.
 
-## What works: stdin-only, no shell
+## What works
 
-The current design, used by both `ask_planner` and `ask_reviewer`:
+`runChildClaude(memoryPath, userPrompt)` is shared by both tools; it
+chooses between two spawn shapes based on startup feature detection.
 
-- `spawn("claude", ["-p"], { shell: false, windowsHide: true })` — no
-  shell interpreter ever sees the prompt, and no prompt content is on
-  the command line.
-- The combined input — role system prompt, a `---` separator, then the
-  Executor's user prompt — is written to the child's stdin and stdin is
-  closed.
+### Supported path: `--system-prompt-file`
+
+- `spawn("claude", ["-p", "--system-prompt-file", memoryPath], { shell: false, windowsHide: true })`
+  — no shell interpreter sees the prompt; the only argv content is the
+  memory file path, which is a controlled internal string and not
+  user-supplied input.
+- The CLI loads the memory file (`PLANNER.md` or `REVIEWER.md`) as the
+  child session's system prompt. The Executor's user prompt is the only
+  thing written to the child's stdin, and stdin is then closed.
 - The child's stdout is captured and returned. Stderr is captured for
   error reporting.
+- Because the system-prompt prefix is the file content and is stable
+  across calls, Anthropic's prompt cache (5-minute TTL) hits on warm
+  calls. See `docs/CACHING.md`.
 
-This makes the prompt content opaque to anything between the bridge and
-the child. No shell. No argv. No injection surface beyond what the
-prompt itself contains, which is bounded by what the Executor would
-normally produce.
+### Fallback path (older CLI, no caching)
 
-The spawn body lives in `runChildClaude(systemPrompt, userPrompt)` and
-is shared by both tools. The only per-tool difference is *which* memory
-file's contents are passed in as `systemPrompt`.
+If startup feature detection (`claude --help`) does not find
+`--system-prompt-file` support, the bridge spawns plain `claude -p`
+and writes the combined input — role system prompt, a `---` separator,
+then the Executor's user prompt — to the child's stdin in one chunk,
+then closes stdin. This matches the v0.5 layout exactly. It is correct
+but the system-prompt content lives inside the user message, which the
+cache does not target.
+
+Both paths preserve the v0.4 invariants: no shell, no user-supplied
+prompt content on argv, no injection surface beyond what the prompt
+itself contains (which is bounded by what the Executor would normally
+produce).
 
 ## The two memory files
 
-`server.js` reads `~/.claude/PLANNER.md` **once at startup** and caches
-it in memory for the life of the process. If the file is missing, the
-process exits with a fatal error before any MCP traffic. This matches
-the v0.4 behavior.
+`server.js` **validates** that `~/.claude/PLANNER.md` is readable
+**once at startup** (a `readFileSync` whose result is discarded). If
+the file is missing, the process exits with a fatal error before any
+MCP traffic. This matches the v0.4 fatal-on-missing contract.
 
-`~/.claude/REVIEWER.md` is read **lazily on the first ask_reviewer
-call** and then cached for the life of the process. If it is missing at
-that point, the call returns a structured Bridge error to the Executor
-(pointing at `examples/reviewer-memory.md`); the bridge process does
-not crash.
+`~/.claude/REVIEWER.md` is **validated lazily on the first
+ask_reviewer call** the same way. If it is missing at that point, the
+call returns a structured Bridge error to the Executor (pointing at
+`examples/reviewer-memory.md`); the bridge process does not crash. The
+"reviewer is readable" check is sticky after its first success so we
+don't re-stat the file on every subsequent call.
 
 The split exists so that:
 
 - Existing v0.4 deployments without a `REVIEWER.md` keep working. They
   can ignore `ask_reviewer` indefinitely.
-- New v0.5 users opt in to the Reviewer role simply by creating
+- New users opt in to the Reviewer role simply by creating
   `REVIEWER.md`. No flag, no config change.
 
-Both files are read **once** per process lifetime. The bridge must be
-restarted to pick up edits. The Executor's MCP client does this
-automatically on config reload, but ad-hoc tweaks mid-session will not
-be picked up until the next reload.
+Memory file **contents** are not held in the bridge process. On the
+supported path the `claude` CLI re-reads the file (via
+`--system-prompt-file`) on every spawn. On the fallback path Node
+re-reads the file before writing it to stdin on every call. The
+practical effect: edits to `PLANNER.md` or `REVIEWER.md` take effect
+on the next `ask_planner` / `ask_reviewer` call without restarting the
+bridge.
+
+One edge case: if `REVIEWER.md` is deleted *after* the first successful
+validation, the sticky "exists" flag means the bridge does not
+re-emit its pretty Bridge error — the CLI's own missing-file error
+will surface on the next call instead.
 
 ## Why two roles, not one
 

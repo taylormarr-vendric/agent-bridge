@@ -34,14 +34,25 @@ verbatim stdout.
 ## How a call works
 
 1. The Executor calls `ask_planner` or `ask_reviewer` with a `prompt`.
-2. `server.js` spawns `claude -p` with `shell: false` and `windowsHide: true`.
-3. It writes the contents of the matching memory file
-   (`PLANNER.md` or `REVIEWER.md`) followed by a `---` separator and the
-   Executor's prompt to the child's **stdin**, then closes stdin.
+2. `server.js` spawns `claude -p --system-prompt-file <PLANNER.md or
+   REVIEWER.md>` with `shell: false` and `windowsHide: true`. The CLI
+   loads the memory file as the child session's system prompt.
+3. Only the Executor's prompt is written to the child's **stdin**, then
+   stdin is closed.
 4. The child's stdout is returned to the Executor as the tool result.
 
-No prompt content is ever passed as a CLI argument and no shell
-interpreter sees it. See `ARCHITECTURE.md` for why.
+**Old-CLI fallback (no caching).** If the local `claude` CLI is too old
+to support `--system-prompt-file` (feature-detected at startup via
+`claude --help`), the bridge falls back to the v0.5 layout: it writes
+the contents of the matching memory file followed by a `---` separator
+and the Executor's prompt to stdin in a single combined input, then
+closes stdin. Behavior is correct but no prompt caching happens on the
+fallback path. See `docs/CACHING.md`.
+
+No prompt **content** is ever passed as a CLI argument and no shell
+interpreter sees it. (On the supported path the memory file *path* is
+on argv, but a path is a controlled internal string, not user input.)
+See `ARCHITECTURE.md` for why this matters.
 
 ## Setup
 

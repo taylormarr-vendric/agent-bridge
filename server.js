@@ -90,8 +90,16 @@ function runChildClaude(memoryPath, userPrompt) {
     });
     child.on("close", (code) => {
       clearTimeout(timer);
-      if (code === 0) resolve(stdout.trim());
-      else reject(new Error("Exit " + code + ": " + (stderr || stdout)));
+      if (code === 0) {
+        resolve(stdout.trim());
+        return;
+      }
+      const errBody = stderr || stdout;
+      const looksLikeAuth = /401|Invalid authentication credentials|Failed to authenticate/i.test(errBody);
+      const hint = looksLikeAuth
+        ? " (hint: the spawned `claude` CLI failed to authenticate — try `claude doctor` or re-login; the bridge is not the source of this error)"
+        : "";
+      reject(new Error("Exit " + code + ": " + errBody + hint));
     });
 
     if (supportsSystemPromptFile) {

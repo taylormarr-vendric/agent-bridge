@@ -5,7 +5,7 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import { spawn } from "node:child_process";
+import { spawn, execSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -14,24 +14,41 @@ const TIMEOUT_MS = 5 * 60 * 1000;
 const PLANNER_MEMORY_PATH = join(homedir(), ".claude", "PLANNER.md");
 const REVIEWER_MEMORY_PATH = join(homedir(), ".claude", "REVIEWER.md");
 
-// Planner memory is required at startup. Fatal-on-missing preserves the
-// v0.4 contract so existing deployments fail loudly if misconfigured.
-let plannerSystemPrompt;
+// Validate planner memory at startup. Preserves the v0.4 fatal-on-missing
+// contract so existing deployments fail loudly if misconfigured.
 try {
-  plannerSystemPrompt = readFileSync(PLANNER_MEMORY_PATH, "utf8");
+  readFileSync(PLANNER_MEMORY_PATH, "utf8");
 } catch (err) {
   console.error("FATAL: cannot read planner memory at " + PLANNER_MEMORY_PATH);
   process.exit(1);
 }
 
-// Reviewer memory is lazy-loaded on first ask_reviewer call so v0.4 users
+// Feature detection: --system-prompt-file is the cacheable path (see docs/CACHING.md).
+// Older claude binaries lack the flag; in that case fall back to the v0.5 stdin layout.
+let supportsSystemPromptFile = false;
+try {
+  const help = execSync("claude --help", {
+    encoding: "utf8",
+    timeout: 10000,
+    windowsHide: true,
+  });
+  // Main help lists the flag indirectly inside the --bare description as
+  // "--system-prompt[-file]". Either spelling is sufficient evidence.
+  supportsSystemPromptFile = /--system-prompt(-file|\[-file\])/.test(help);
+} catch (err) {
+  // If we can't even probe `claude --help`, the child spawn would fail too;
+  // let the per-call error path surface that instead of failing at startup.
+  supportsSystemPromptFile = false;
+}
+
+// Reviewer memory is validated lazily on first ask_reviewer call so v0.4 users
 // without REVIEWER.md can still start the bridge and keep using ask_planner.
-let reviewerSystemPrompt = null;
-function loadReviewerPrompt() {
-  if (reviewerSystemPrompt !== null) return reviewerSystemPrompt;
+let reviewerValidated = false;
+function ensureReviewerReadable() {
+  if (reviewerValidated) return;
   try {
-    reviewerSystemPrompt = readFileSync(REVIEWER_MEMORY_PATH, "utf8");
-    return reviewerSystemPrompt;
+    readFileSync(REVIEWER_MEMORY_PATH, "utf8");
+    reviewerValidated = true;
   } catch (err) {
     throw new Error(
       "Reviewer memory missing at " + REVIEWER_MEMORY_PATH +
@@ -40,22 +57,22 @@ function loadReviewerPrompt() {
   }
 }
 
-function runChildClaude(systemPrompt, userPrompt) {
+function runChildClaude(memoryPath, userPrompt) {
   return new Promise((resolve, reject) => {
-    // Send: role/system context on top, separator, then user prompt.
-    // All via stdin. NO shell, NO CLI string args with content.
-    const combinedInput =
-      "SYSTEM CONTEXT (your role and rules):\n" +
-      systemPrompt +
-      "\n\n---\n\nUSER MESSAGE:\n" +
-      userPrompt;
+    // Two spawn shapes. Both keep prompt CONTENT off argv (v0.4 rule).
+    //   Cached path: the role memory is passed via --system-prompt-file <path>;
+    //                only the path (a controlled internal string) is on argv.
+    //                The user prompt is the only thing on stdin.
+    //   Fallback:    no --system-prompt-file support — write memory + separator
+    //                + user prompt to stdin (the v0.5 layout).
+    const args = supportsSystemPromptFile
+      ? ["-p", "--system-prompt-file", memoryPath]
+      : ["-p"];
 
-    const child = spawn("claude", ["-p"], {
+    const child = spawn("claude", args, {
       shell: false,
       windowsHide: true,
-      env: {
-        ...process.env,
-      },
+      env: { ...process.env },
     });
     let stdout = "";
     let stderr = "";
@@ -77,13 +94,23 @@ function runChildClaude(systemPrompt, userPrompt) {
       else reject(new Error("Exit " + code + ": " + (stderr || stdout)));
     });
 
-    child.stdin.write(combinedInput);
+    if (supportsSystemPromptFile) {
+      child.stdin.write(userPrompt);
+    } else {
+      const memory = readFileSync(memoryPath, "utf8");
+      const combinedInput =
+        "SYSTEM CONTEXT (your role and rules):\n" +
+        memory +
+        "\n\n---\n\nUSER MESSAGE:\n" +
+        userPrompt;
+      child.stdin.write(combinedInput);
+    }
     child.stdin.end();
   });
 }
 
 const server = new Server(
-  { name: "agent-bridge", version: "0.5.0" },
+  { name: "agent-bridge", version: "0.5.1" },
   { capabilities: { tools: {} } }
 );
 
@@ -119,9 +146,10 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
   try {
     let result;
     if (name === "ask_planner") {
-      result = await runChildClaude(plannerSystemPrompt, args.prompt);
+      result = await runChildClaude(PLANNER_MEMORY_PATH, args.prompt);
     } else if (name === "ask_reviewer") {
-      result = await runChildClaude(loadReviewerPrompt(), args.prompt);
+      ensureReviewerReadable();
+      result = await runChildClaude(REVIEWER_MEMORY_PATH, args.prompt);
     } else {
       throw new Error("Unknown tool: " + name);
     }
@@ -136,4 +164,8 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
 
 const transport = new StdioServerTransport();
 await server.connect(transport);
-console.error("agent-bridge v0.5 (planner + reviewer, stdin-only, no shell) running on stdio");
+console.error(
+  supportsSystemPromptFile
+    ? "agent-bridge v0.5.1 (planner + reviewer, --system-prompt-file, prompt caching) running on stdio"
+    : "agent-bridge v0.5.1 (planner + reviewer, stdin fallback, no caching) running on stdio"
+);
